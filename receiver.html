@@ -88,8 +88,8 @@
 </head>
 <body>
 <h1>TXQR Receiver</h1>
-<video id="video" autoplay muted playsinline style="display:none;"></video>
-<canvas id="canvas" width="640" height="640" style="width:100%;max-width:640px;"></canvas>
+<video id="video" width="100%" height="400" autoplay muted playsinline></video>
+<canvas id="canvas" width="640" height="640" style="display:none;"></canvas>
 
 <div class="progress-container">
     <div class="file-info">
@@ -149,7 +149,7 @@
         return new Uint8Array(result);
     }
 
-    // 请求尽可能大的正方形分辨率摄像头
+    // 请求高分辨率摄像头
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         document.getElementById('status').textContent = "错误：浏览器不支持摄像头访问，请使用 HTTPS 访问";
     } else {
@@ -157,16 +157,10 @@
             video: {
                 facingMode: "environment",
                 width: { ideal: 4096 },
-                height: { ideal: 4096 },
-                aspectRatio: { ideal: 1 }
+                height: { ideal: 2160 }
             }
         })
-            .then(stream => {
-                video.srcObject = stream;
-                let track = stream.getVideoTracks()[0];
-                let settings = track.getSettings();
-                console.log(`摄像头实际分辨率: ${settings.width}x${settings.height}`);
-            })
+            .then(stream => video.srcObject = stream)
             .catch(err => {
                 console.error(err);
                 document.getElementById('status').textContent = "摄像头错误: " + err.message;
@@ -380,13 +374,7 @@
     let lastFrameData = "";
 
     function scanFrame() {
-        // 从视频中心裁切最大正方形区域，避免拉伸变形
-        let vw = video.videoWidth || canvas.width;
-        let vh = video.videoHeight || canvas.height;
-        let side = Math.min(vw, vh);
-        let sx = (vw - side) / 2;
-        let sy = (vh - side) / 2;
-        ctx.drawImage(video, sx, sy, side, side, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         let code = jsQR(imageData.data, imageData.width, imageData.height);
         if (code && code.data !== lastFrameData) {
