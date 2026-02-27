@@ -6,6 +6,7 @@
   <style>
     body { font-family: sans-serif; text-align: center; padding: 20px; }
     #qr { width: 300px; height: 300px; margin: 20px auto; }
+    .info { margin: 10px 0; color: #666; }
   </style>
 </head>
 <body>
@@ -13,11 +14,42 @@
   <input type="file" id="fileInput"><br><br>
   <label>Chunk Size (bytes): <input type="number" id="chunkSize" value="512"></label><br><br>
   <canvas id="qr"></canvas>
+  <div class="info" id="fileInfo"></div>
+  <div class="info" id="streamInfo"></div>
 
   <script>
     let chunks = [];
+    let totalChunks = 0;
+    let fileSize = 0;
+    let fileName = "";
     let canvas = document.getElementById('qr');
     let ctx = canvas.getContext('2d');
+    let streamInterval = null;
+
+    // Base45 编码表 (QR 码 Alphanumeric 字符集)
+    const BASE45_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+
+    function encodeBase45(uint8array) {
+      let result = "";
+      for (let i = 0; i < uint8array.length; i += 2) {
+        if (i + 1 < uint8array.length) {
+          let x = (uint8array[i] << 8) + uint8array[i + 1];
+          let e = x % 45;
+          x = Math.floor(x / 45);
+          let d = x % 45;
+          x = Math.floor(x / 45);
+          let c = x % 45;
+          result += BASE45_CHARS[c] + BASE45_CHARS[d] + BASE45_CHARS[e];
+        } else {
+          let x = uint8array[i];
+          let d = x % 45;
+          x = Math.floor(x / 45);
+          let c = x % 45;
+          result += BASE45_CHARS[c] + BASE45_CHARS[d];
+        }
+      }
+      return result;
+    }
 
     function chunkData(buffer, size) {
       let result = [];
@@ -41,27 +73,68 @@
         }
       }
 
-      let meta = `${count}:${indices.join(",")}`;
-      let payload = btoa(String.fromCharCode(...xor));
+      // 新格式: total|size|count:indices|payload (使用 Base45)
+      let meta = `${totalChunks}|${fileSize}|${count}:${indices.join(",")}`;
+      let payload = encodeBase45(xor);
       return `${meta}|${payload}`;
     }
 
+    // 发送元信息帧
+    function generateMetaFrame() {
+      // 格式: META|total|size|filename
+      let encodedName = encodeURIComponent(fileName);
+      return `META|${totalChunks}|${fileSize}|${encodedName}`;
+    }
+
     function startStreaming() {
-      setInterval(() => {
-        let data = generateFountainChunk(chunks);
+      let frameCount = 0;
+      streamInterval = setInterval(() => {
+        let data;
+        // 每10帧发送一次元信息
+        if (frameCount % 10 === 0) {
+          data = generateMetaFrame();
+        } else {
+          data = generateFountainChunk(chunks);
+        }
+        frameCount++;
+
         QRCode.toCanvas(canvas, data, { width: 300 }, err => {
           if (err) console.error(err);
         });
-      }, 200); // Adjust frame rate
+
+        document.getElementById('streamInfo').textContent = `Streaming... Frame: ${frameCount}`;
+      }, 200);
     }
 
     document.getElementById('fileInput').addEventListener('change', async e => {
       let file = e.target.files[0];
+      if (!file) return;
+
+      // 停止之前的流
+      if (streamInterval) {
+        clearInterval(streamInterval);
+        streamInterval = null;
+      }
+
       let chunkSize = parseInt(document.getElementById('chunkSize').value);
       let buffer = await file.arrayBuffer();
+
+      fileSize = buffer.byteLength;
+      fileName = file.name;
       chunks = chunkData(buffer, chunkSize);
+      totalChunks = chunks.length;
+
+      document.getElementById('fileInfo').textContent = 
+        `文件: ${fileName} | 大小: ${formatSize(fileSize)} | 分块: ${totalChunks}`;
+
       startStreaming();
     });
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    }
   </script>
 </body>
 </html>

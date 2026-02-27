@@ -24,19 +24,114 @@
             flex: 1;
             overflow: auto;
         }
+
+        /* 进度信息样式 */
+        .progress-container {
+            margin: 15px auto;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 10px;
+            max-width: 400px;
+        }
+
+        .file-info {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .file-name {
+            font-weight: bold;
+            color: #333;
+            word-break: break-all;
+        }
+
+        .progress-bar-container {
+            background: #ddd;
+            border-radius: 10px;
+            height: 20px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .progress-bar {
+            background: linear-gradient(90deg, #4CAF50, #8BC34A);
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 10px;
+        }
+
+        .progress-text {
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .progress-detail {
+            font-size: 12px;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        .complete {
+            background: linear-gradient(90deg, #2196F3, #03A9F4);
+        }
     </style>
 </head>
 <body>
 <h1>TXQR Receiver</h1>
-<video id="video" width="100%" height="600" autoplay muted playsinline></video>
+<video id="video" width="100%" height="400" autoplay muted playsinline></video>
 <canvas id="canvas" width="300" height="300" style="display:none;"></canvas>
-<p id="status">Waiting for chunks...</p>
+
+<div class="progress-container">
+    <div class="file-info">
+        📁 文件: <span class="file-name" id="fileName">等待接收...</span>
+    </div>
+    <div class="progress-bar-container">
+        <div class="progress-bar" id="progressBar"></div>
+    </div>
+    <div class="progress-text" id="progressText">0%</div>
+    <div class="progress-detail" id="progressDetail">已接收: 0 / 0 块 | 0 B</div>
+</div>
+
+<p id="status">Waiting for QR codes...</p>
 
 <script>
     let receivedChunks = {};
+    let totalChunks = 0;
+    let fileSize = 0;
+    let fileName = "reconstructed_file.bin";
     let video = document.getElementById('video');
     let canvas = document.getElementById('canvas');
     let ctx = canvas.getContext('2d');
+
+    // Base45 解码表
+    const BASE45_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+    const BASE45_MAP = {};
+    for (let i = 0; i < BASE45_CHARS.length; i++) {
+        BASE45_MAP[BASE45_CHARS[i]] = i;
+    }
+
+    function decodeBase45(str) {
+        let result = [];
+        for (let i = 0; i < str.length; i += 3) {
+            if (i + 2 < str.length) {
+                let c = BASE45_MAP[str[i]];
+                let d = BASE45_MAP[str[i + 1]];
+                let e = BASE45_MAP[str[i + 2]];
+                let x = c * 45 * 45 + d * 45 + e;
+                result.push(x >> 8);
+                result.push(x & 0xff);
+            } else if (i + 1 < str.length) {
+                let c = BASE45_MAP[str[i]];
+                let d = BASE45_MAP[str[i + 1]];
+                let x = c * 45 + d;
+                result.push(x);
+            }
+        }
+        return new Uint8Array(result);
+    }
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         document.getElementById('status').textContent = "错误：浏览器不支持摄像头访问，请使用 HTTPS 访问";
@@ -49,25 +144,89 @@
             });
     }
 
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    }
+
+    function updateProgress() {
+        let received = Object.keys(receivedChunks).length;
+        let percentage = totalChunks > 0 ? Math.round((received / totalChunks) * 100) : 0;
+        let receivedSize = 0;
+        Object.values(receivedChunks).forEach(chunk => {
+            receivedSize += chunk.byteLength;
+        });
+
+        document.getElementById('progressBar').style.width = percentage + '%';
+        document.getElementById('progressText').textContent = percentage + '%';
+        document.getElementById('progressDetail').textContent = 
+            `已接收: ${received} / ${totalChunks} 块 | ${formatSize(receivedSize)} / ${formatSize(fileSize)}`;
+
+        if (percentage >= 100) {
+            document.getElementById('progressBar').classList.add('complete');
+            document.getElementById('progressText').textContent = '✅ 接收完成!';
+        }
+    }
+
+    function decodeMetaFrame(data) {
+        // 格式: META|total|size|filename
+        let parts = data.split("|");
+        if (parts.length >= 4 && parts[0] === "META") {
+            totalChunks = parseInt(parts[1]);
+            fileSize = parseInt(parts[2]);
+            fileName = decodeURIComponent(parts[3]);
+            document.getElementById('fileName').textContent = fileName;
+            updateProgress();
+            return true;
+        }
+        return false;
+    }
+
     function decodeFountainChunk(data) {
         try {
-            let [meta, payload] = data.split("|");
-            let [count, indices] = meta.split(":");
+            // 检查是否是元信息帧
+            if (data.startsWith("META|")) {
+                return decodeMetaFrame(data) ? null : null;
+            }
+
+            // 新格式: total|size|count:indices|payload
+            let parts = data.split("|");
+            if (parts.length < 3) return null;
+
+            // 更新元信息
+            if (!totalChunks) {
+                totalChunks = parseInt(parts[0]);
+                fileSize = parseInt(parts[1]);
+            }
+
+            // 解析索引
+            let metaPart = parts[2];
+            let [count, indices] = metaPart.split(":");
             let indexList = indices.split(",").map(Number);
-            let chunk = Uint8Array.from(atob(payload), c => c.charCodeAt(0));
+
+            // 解码 Base45 payload
+            let payload = parts.slice(3).join("|"); // 处理 payload 中可能包含的 |
+            let chunk = decodeBase45(payload);
+
             return { indices: indexList, chunk };
         } catch (e) {
+            console.error("Decode error:", e);
             return null;
         }
     }
 
     function reconstructFile() {
-        let blob = new Blob(Object.values(receivedChunks), { type: "application/octet-stream" });
+        // 按索引顺序重组文件
+        let sortedKeys = Object.keys(receivedChunks).map(Number).sort((a, b) => a - b);
+        let chunks = sortedKeys.map(k => receivedChunks[k]);
+        let blob = new Blob(chunks, { type: "application/octet-stream" });
         let url = URL.createObjectURL(blob);
         let a = document.createElement("a");
         a.href = url;
-        a.download = "reconstructed_file.bin";
+        a.download = fileName;
         a.click();
+        URL.revokeObjectURL(url);
     }
 
     function scanFrame() {
@@ -82,10 +241,13 @@
                         receivedChunks[i] = result.chunk;
                     }
                 });
-                document.getElementById('status').textContent = `Chunks received: ${Object.keys(receivedChunks).length}`;
-                if (Object.keys(receivedChunks).length > 20) {
+                updateProgress();
+
+                // 检查是否完成
+                if (totalChunks > 0 && Object.keys(receivedChunks).length >= totalChunks) {
                     reconstructFile();
-                    document.getElementById('status').textContent = "File reconstructed!";
+                    document.getElementById('status').textContent = "✅ File reconstructed successfully!";
+                    return; // 停止扫描
                 }
             }
         }
