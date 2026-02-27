@@ -149,7 +149,7 @@
         return new Uint8Array(result);
     }
 
-    // 请求高分辨率摄像头
+    // 请求尽可能大的正方形分辨率摄像头
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         document.getElementById('status').textContent = "错误：浏览器不支持摄像头访问，请使用 HTTPS 访问";
     } else {
@@ -157,10 +157,20 @@
             video: {
                 facingMode: "environment",
                 width: { ideal: 4096 },
-                height: { ideal: 2160 }
+                height: { ideal: 4096 },
+                aspectRatio: { ideal: 1 }
             }
         })
-            .then(stream => video.srcObject = stream)
+            .then(stream => {
+                video.srcObject = stream;
+                // 视频就绪后，将 canvas 设为实际视频短边的正方形
+                let track = stream.getVideoTracks()[0];
+                let settings = track.getSettings();
+                let side = Math.min(settings.width || 640, settings.height || 640);
+                canvas.width = side;
+                canvas.height = side;
+                console.log(`摄像头实际分辨率: ${settings.width}x${settings.height}, canvas: ${side}x${side}`);
+            })
             .catch(err => {
                 console.error(err);
                 document.getElementById('status').textContent = "摄像头错误: " + err.message;
