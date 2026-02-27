@@ -74,6 +74,7 @@
       let ctx = canvas.getContext("2d");
       let streamInterval = null;
       let currentData = null;
+      let roundRobinIndex = 0; // 轮询索引，确保每个块都会被发送
 
       // 计算二维码最大尺寸
       function getQRSize() {
@@ -140,12 +141,17 @@
         return result;
       }
 
-      function generateFountainChunk(chunks) {
-        // 50% 概率发送单块帧（直接可用，无需解码），其余混合最多3块
-        let count =
-          Math.random() < 0.5
-            ? 1
-            : Math.floor(Math.random() * Math.min(3, chunks.length)) + 1;
+      // 生成单块帧（指定索引）
+      function generateSingleChunk(index) {
+        let chunk = new Uint8Array(chunks[index]);
+        let meta = `${totalChunks}|${fileSize}|1:${index}`;
+        let payload = encodeBase45(chunk);
+        return `${meta}|${payload}`;
+      }
+
+      // 生成混合帧（随机多块 XOR）
+      function generateMixedChunk(chunks) {
+        let count = Math.floor(Math.random() * Math.min(3, chunks.length)) + 1;
         let indices = [];
         let xor = new Uint8Array(chunks[0].byteLength).fill(0);
 
@@ -158,10 +164,23 @@
           }
         }
 
-        // 新格式: total|size|count:indices|payload (使用 Base45)
         let meta = `${totalChunks}|${fileSize}|${count}:${indices.join(",")}`;
         let payload = encodeBase45(xor);
         return `${meta}|${payload}`;
+      }
+
+      function generateFountainChunk(chunks) {
+        // 策略：80% 轮询单块帧 + 20% 随机混合帧
+        // 轮询确保每个块都会被发送，混合帧提供消元解码能力
+        if (Math.random() < 0.8) {
+          // 轮询单块帧
+          let idx = roundRobinIndex;
+          roundRobinIndex = (roundRobinIndex + 1) % chunks.length;
+          return generateSingleChunk(idx);
+        } else {
+          // 随机混合帧（2-3块 XOR）
+          return generateMixedChunk(chunks);
+        }
       }
 
       // 发送元信息帧
@@ -186,7 +205,7 @@
           renderQR(data);
 
           document.getElementById("streamInfo").textContent = `Streaming... `;
-        }, 50);
+        }, 100);
       }
 
       document
@@ -200,6 +219,9 @@
             clearInterval(streamInterval);
             streamInterval = null;
           }
+          
+          // 重置轮询索引
+          roundRobinIndex = 0;
 
           let chunkSize = parseInt(document.getElementById("chunkSize").value);
           let buffer = await file.arrayBuffer();
