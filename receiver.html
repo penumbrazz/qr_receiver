@@ -38,8 +38,16 @@
     let canvas = document.getElementById('canvas');
     let ctx = canvas.getContext('2d');
 
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-        .then(stream => video.srcObject = stream);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        document.getElementById('status').textContent = "错误：浏览器不支持摄像头访问，请使用 HTTPS 访问";
+    } else {
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+            .then(stream => video.srcObject = stream)
+            .catch(err => {
+                console.error(err);
+                document.getElementById('status').textContent = "摄像头错误: " + err.message;
+            });
+    }
 
     function decodeFountainChunk(data) {
         try {
