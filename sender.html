@@ -109,7 +109,7 @@
         streamInterval = setInterval(() => {
           let data;
           // 每10帧发送一次元信息
-          if (frameCount % 20 === 0) {
+          if (frameCount % 10 === 0) {
             data = generateMetaFrame();
           } else {
             data = generateFountainChunk(chunks);

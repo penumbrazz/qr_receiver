@@ -111,7 +111,8 @@
     let pendingFrames = [];       // 待解码的 XOR 混合帧 [{indices: [], chunk: Uint8Array}]
     let totalChunks = 0;
     let fileSize = 0;
-    let fileName = "reconstructed_file.bin";
+    let fileName = "";            // 空字符串表示尚未收到文件名
+    let receivedMeta = false;     // 是否已收到 META 帧
     let video = document.getElementById('video');
     let canvas = document.getElementById('canvas');
     let ctx = canvas.getContext('2d');
@@ -211,6 +212,7 @@
             totalChunks = parseInt(parts[1]);
             fileSize = parseInt(parts[2]);
             fileName = decodeURIComponent(parts[3]);
+            receivedMeta = true;
             document.getElementById('fileName').textContent = fileName;
             updateProgress();
             return true;
@@ -343,6 +345,13 @@
     }
 
     function reconstructFile() {
+        // 如果没收到 META 帧，提示用户输入文件名
+        let downloadName = fileName;
+        if (!receivedMeta || !downloadName) {
+            let userInput = prompt("未收到文件名信息，请输入保存的文件名:", "reconstructed_file.bin");
+            downloadName = userInput || "reconstructed_file.bin";
+        }
+
         // 按索引顺序重组文件
         let sortedKeys = Object.keys(decodedChunks).map(Number).sort((a, b) => a - b);
         let chunks = sortedKeys.map(k => decodedChunks[k]);
@@ -356,7 +365,7 @@
         let url = URL.createObjectURL(blob);
         let a = document.createElement("a");
         a.href = url;
-        a.download = fileName;
+        a.download = downloadName;
         a.click();
         URL.revokeObjectURL(url);
     }
