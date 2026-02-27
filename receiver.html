@@ -74,6 +74,13 @@
             margin-top: 5px;
         }
 
+        .speed-info {
+            font-size: 13px;
+            color: #4CAF50;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+
         .complete {
             background: linear-gradient(90deg, #2196F3, #03A9F4);
         }
@@ -82,7 +89,7 @@
 <body>
 <h1>TXQR Receiver</h1>
 <video id="video" width="100%" height="400" autoplay muted playsinline></video>
-<canvas id="canvas" width="300" height="300" style="display:none;"></canvas>
+<canvas id="canvas" width="640" height="640" style="display:none;"></canvas>
 
 <div class="progress-container">
     <div class="file-info">
@@ -93,18 +100,26 @@
     </div>
     <div class="progress-text" id="progressText">0%</div>
     <div class="progress-detail" id="progressDetail">已接收: 0 / 0 块 | 0 B</div>
+    <div class="speed-info" id="speedInfo">⚡ 速率: -- KB/s</div>
 </div>
 
 <p id="status">Waiting for QR codes...</p>
 
 <script>
-    let receivedChunks = {};
+    // === 已解码的块 ===
+    let decodedChunks = {};       // 索引 -> Uint8Array (已确认解码的单块数据)
+    let pendingFrames = [];       // 待解码的 XOR 混合帧 [{indices: [], chunk: Uint8Array}]
     let totalChunks = 0;
     let fileSize = 0;
     let fileName = "reconstructed_file.bin";
     let video = document.getElementById('video');
     let canvas = document.getElementById('canvas');
     let ctx = canvas.getContext('2d');
+
+    // 速率统计
+    let startTime = null;
+    let lastSpeedUpdate = 0;
+    let lastDecodedCount = 0;
 
     // Base45 解码表
     const BASE45_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
@@ -133,10 +148,17 @@
         return new Uint8Array(result);
     }
 
+    // 请求高分辨率摄像头
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         document.getElementById('status').textContent = "错误：浏览器不支持摄像头访问，请使用 HTTPS 访问";
     } else {
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+        navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: "environment",
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            }
+        })
             .then(stream => video.srcObject = stream)
             .catch(err => {
                 console.error(err);
@@ -151,21 +173,34 @@
     }
 
     function updateProgress() {
-        let received = Object.keys(receivedChunks).length;
+        let received = Object.keys(decodedChunks).length;
         let percentage = totalChunks > 0 ? Math.round((received / totalChunks) * 100) : 0;
         let receivedSize = 0;
-        Object.values(receivedChunks).forEach(chunk => {
+        Object.values(decodedChunks).forEach(chunk => {
             receivedSize += chunk.byteLength;
         });
 
         document.getElementById('progressBar').style.width = percentage + '%';
         document.getElementById('progressText').textContent = percentage + '%';
-        document.getElementById('progressDetail').textContent = 
+        document.getElementById('progressDetail').textContent =
             `已接收: ${received} / ${totalChunks} 块 | ${formatSize(receivedSize)} / ${formatSize(fileSize)}`;
+
+        // 计算传输速率
+        let now = Date.now();
+        if (startTime && now - lastSpeedUpdate > 500) {
+            let elapsed = (now - startTime) / 1000;
+            let speed = receivedSize / elapsed;
+            document.getElementById('speedInfo').textContent =
+                `⚡ 速率: ${(speed / 1024).toFixed(1)} KB/s | 已用时: ${elapsed.toFixed(1)}s`;
+            lastSpeedUpdate = now;
+        }
 
         if (percentage >= 100) {
             document.getElementById('progressBar').classList.add('complete');
+            let elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
             document.getElementById('progressText').textContent = '✅ 接收完成!';
+            document.getElementById('speedInfo').textContent =
+                `⚡ 总用时: ${elapsed}s | 平均速率: ${(receivedSize / 1024 / (elapsed)).toFixed(1)} KB/s`;
         }
     }
 
@@ -183,16 +218,89 @@
         return false;
     }
 
+    // === XOR 工具函数 ===
+    function xorArrays(a, b) {
+        let len = Math.max(a.length, b.length);
+        let result = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            result[i] = (a[i] || 0) ^ (b[i] || 0);
+        }
+        return result;
+    }
+
+    // === Fountain 码在线解码 ===
+    // 当收到一个帧时：
+    //   1. 用已知的 decodedChunks 消元
+    //   2. 如果消元后只剩 1 个未知索引 → 解码成功，存入 decodedChunks
+    //   3. 每次新解码一个块后，回溯所有 pendingFrames 尝试进一步消元
+    function tryResolveFrame(frame) {
+        let { indices, chunk } = frame;
+        let data = new Uint8Array(chunk);
+
+        // 用已知块消元
+        let unknowns = [];
+        for (let idx of indices) {
+            if (decodedChunks[idx]) {
+                data = xorArrays(data, decodedChunks[idx]);
+            } else {
+                unknowns.push(idx);
+            }
+        }
+
+        if (unknowns.length === 0) {
+            // 所有块已知，这个帧是冗余的
+            return null;
+        } else if (unknowns.length === 1) {
+            // 只剩一个未知块 → 解码成功！
+            return { index: unknowns[0], data: data };
+        } else {
+            // 多个未知块，暂存待后续消元
+            return { pending: true, indices: unknowns, chunk: data };
+        }
+    }
+
+    function processNewChunk(index, data) {
+        if (decodedChunks[index]) return; // 已有
+
+        decodedChunks[index] = data;
+        if (!startTime) startTime = Date.now();
+
+        // 回溯所有 pendingFrames，尝试用新块进一步消元
+        let changed = true;
+        while (changed) {
+            changed = false;
+            let newPending = [];
+            for (let frame of pendingFrames) {
+                let result = tryResolveFrame(frame);
+                if (result === null) {
+                    // 冗余帧，丢弃
+                    continue;
+                } else if (result.pending) {
+                    // 仍有多个未知
+                    newPending.push({ indices: result.indices, chunk: result.chunk });
+                } else {
+                    // 解码出一个新块！
+                    if (!decodedChunks[result.index]) {
+                        decodedChunks[result.index] = result.data;
+                        changed = true;
+                    }
+                }
+            }
+            pendingFrames = newPending;
+        }
+    }
+
     function decodeFountainChunk(data) {
         try {
             // 检查是否是元信息帧
             if (data.startsWith("META|")) {
-                return decodeMetaFrame(data) ? null : null;
+                decodeMetaFrame(data);
+                return false;
             }
 
             // 新格式: total|size|count:indices|payload
             let parts = data.split("|");
-            if (parts.length < 3) return null;
+            if (parts.length < 3) return false;
 
             // 更新元信息
             if (!totalChunks) {
@@ -209,18 +317,42 @@
             let payload = parts.slice(3).join("|"); // 处理 payload 中可能包含的 |
             let chunk = decodeBase45(payload);
 
-            return { indices: indexList, chunk };
+            // === 正确的 Fountain 码解码 ===
+            let result = tryResolveFrame({ indices: indexList, chunk: chunk });
+
+            if (result === null) {
+                // 冗余帧
+                return false;
+            } else if (result.pending) {
+                // 暂存待消元
+                pendingFrames.push({ indices: result.indices, chunk: result.chunk });
+                // 限制 pending 队列长度，避免内存膨胀
+                if (pendingFrames.length > 500) {
+                    pendingFrames = pendingFrames.slice(-300);
+                }
+                return false;
+            } else {
+                // 直接解码成功
+                processNewChunk(result.index, result.data);
+                return true;
+            }
         } catch (e) {
             console.error("Decode error:", e);
-            return null;
+            return false;
         }
     }
 
     function reconstructFile() {
         // 按索引顺序重组文件
-        let sortedKeys = Object.keys(receivedChunks).map(Number).sort((a, b) => a - b);
-        let chunks = sortedKeys.map(k => receivedChunks[k]);
+        let sortedKeys = Object.keys(decodedChunks).map(Number).sort((a, b) => a - b);
+        let chunks = sortedKeys.map(k => decodedChunks[k]);
         let blob = new Blob(chunks, { type: "application/octet-stream" });
+
+        // 截断到实际文件大小
+        if (fileSize > 0) {
+            blob = blob.slice(0, fileSize);
+        }
+
         let url = URL.createObjectURL(blob);
         let a = document.createElement("a");
         a.href = url;
@@ -229,26 +361,23 @@
         URL.revokeObjectURL(url);
     }
 
+    // 去重：避免重复处理同一帧
+    let lastFrameData = "";
+
     function scanFrame() {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         let code = jsQR(imageData.data, imageData.width, imageData.height);
-        if (code) {
-            let result = decodeFountainChunk(code.data);
-            if (result) {
-                result.indices.forEach(i => {
-                    if (!receivedChunks[i]) {
-                        receivedChunks[i] = result.chunk;
-                    }
-                });
-                updateProgress();
+        if (code && code.data !== lastFrameData) {
+            lastFrameData = code.data;
+            decodeFountainChunk(code.data);
+            updateProgress();
 
-                // 检查是否完成
-                if (totalChunks > 0 && Object.keys(receivedChunks).length >= totalChunks) {
-                    reconstructFile();
-                    document.getElementById('status').textContent = "✅ File reconstructed successfully!";
-                    return; // 停止扫描
-                }
+            // 检查是否完成
+            if (totalChunks > 0 && Object.keys(decodedChunks).length >= totalChunks) {
+                reconstructFile();
+                document.getElementById('status').textContent = "✅ File reconstructed successfully!";
+                return; // 停止扫描
             }
         }
         requestAnimationFrame(scanFrame);
