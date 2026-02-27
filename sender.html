@@ -4,30 +4,64 @@
     <title>TXQR Sender</title>
     <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
     <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
       body {
         font-family: sans-serif;
         text-align: center;
-        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        padding: 10px;
+      }
+      .controls {
+        flex-shrink: 0;
+        padding-bottom: 10px;
+      }
+      .controls h1 {
+        font-size: 1.2em;
+        margin-bottom: 8px;
+      }
+      .controls label {
+        font-size: 0.9em;
+      }
+      #qr-container {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 0;
       }
       #qr {
-        width: 400px;
-        height: 400px;
-        margin: 20px auto;
+        max-width: 100%;
+        max-height: 100%;
       }
       .info {
-        margin: 10px 0;
+        flex-shrink: 0;
+        margin: 5px 0;
         color: #666;
+        font-size: 0.85em;
       }
     </style>
   </head>
   <body>
-    <h1>TXQR Sender</h1>
-    <input type="file" id="fileInput" /><br /><br />
-    <label
-      >Chunk Size (bytes):
-      <input type="number" id="chunkSize" value="900" /></label
-    ><br /><br />
-    <canvas id="qr"></canvas>
+    <div class="controls">
+      <h1>TXQR Sender</h1>
+      <input type="file" id="fileInput" />
+      <label
+        >Chunk Size:
+        <input type="number" id="chunkSize" value="900" /></label>
+    </div>
+    <div id="qr-container">
+      <canvas id="qr"></canvas>
+    </div>
     <div class="info" id="fileInfo"></div>
     <div class="info" id="streamInfo"></div>
 
@@ -39,6 +73,39 @@
       let canvas = document.getElementById("qr");
       let ctx = canvas.getContext("2d");
       let streamInterval = null;
+      let currentData = null;
+
+      // 计算二维码最大尺寸
+      function getQRSize() {
+        const container = document.getElementById("qr-container");
+        const rect = container.getBoundingClientRect();
+        // 取宽高中较小值，保持正方形，留一点边距
+        return Math.min(rect.width, rect.height) - 20;
+      }
+
+      // 监听窗口大小变化
+      window.addEventListener("resize", () => {
+        if (currentData) {
+          renderQR(currentData);
+        }
+      });
+
+      function renderQR(data) {
+        currentData = data;
+        const size = Math.max(100, getQRSize()); // 最小100px
+        QRCode.toCanvas(
+          canvas,
+          data,
+          {
+            width: size,
+            errorCorrectionLevel: "L",
+            margin: 1,
+          },
+          (err) => {
+            if (err) console.error(err);
+          },
+        );
+      }
 
       // Base45 编码表 (QR 码 Alphanumeric 字符集)
       const BASE45_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
@@ -116,18 +183,7 @@
           }
           frameCount++;
 
-          QRCode.toCanvas(
-            canvas,
-            data,
-            {
-              width: 400,
-              errorCorrectionLevel: "L",
-              margin: 1,
-            },
-            (err) => {
-              if (err) console.error(err);
-            },
-          );
+          renderQR(data);
 
           document.getElementById("streamInfo").textContent = `Streaming... `;
         }, 50);

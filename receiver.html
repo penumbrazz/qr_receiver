@@ -109,6 +109,8 @@
     // === 已解码的块 ===
     let decodedChunks = {};       // 索引 -> Uint8Array (已确认解码的单块数据)
     let pendingFrames = [];       // 待解码的 XOR 混合帧 [{indices: [], chunk: Uint8Array}]
+    let pendingIndexMap = {};     // 索引 -> Set<pendingFrame索引> 的映射，加速查找
+    let processedFrameHashes = new Set(); // 已处理帧的哈希集合，用于去重
     let totalChunks = 0;
     let fileSize = 0;
     let fileName = "";            // 空字符串表示尚未收到文件名
@@ -230,6 +232,34 @@
         return result;
     }
 
+    // === 帧哈希函数：生成索引组合的唯一标识 ===
+    function getFrameHash(indices) {
+        // 排序后拼接，确保相同索引组合产生相同哈希
+        return indices.slice().sort((a, b) => a - b).join(',');
+    }
+
+    // === 添加 pendingFrame 到索引映射 ===
+    function addToPendingIndexMap(indices, frameIdx) {
+        for (let idx of indices) {
+            if (!pendingIndexMap[idx]) {
+                pendingIndexMap[idx] = new Set();
+            }
+            pendingIndexMap[idx].add(frameIdx);
+        }
+    }
+
+    // === 从索引映射中移除 pendingFrame ===
+    function removeFromPendingIndexMap(indices, frameIdx) {
+        for (let idx of indices) {
+            if (pendingIndexMap[idx]) {
+                pendingIndexMap[idx].delete(frameIdx);
+                if (pendingIndexMap[idx].size === 0) {
+                    delete pendingIndexMap[idx];
+                }
+            }
+        }
+    }
+
     // === Fountain 码在线解码 ===
     // 当收到一个帧时：
     //   1. 用已知的 decodedChunks 消元
@@ -267,28 +297,66 @@
         decodedChunks[index] = data;
         if (!startTime) startTime = Date.now();
 
-        // 回溯所有 pendingFrames，尝试用新块进一步消元
-        let changed = true;
-        while (changed) {
-            changed = false;
-            let newPending = [];
-            for (let frame of pendingFrames) {
+        // 使用索引映射，只处理包含当前解码块的 pendingFrames
+        // 采用队列方式处理新解码的块
+        let newlyDecoded = [{ index, data }];
+        
+        while (newlyDecoded.length > 0) {
+            let { index: currentIdx } = newlyDecoded.shift();
+            
+            // 获取所有包含当前索引的 pendingFrame 索引
+            let relatedFrameIdxs = pendingIndexMap[currentIdx];
+            if (!relatedFrameIdxs) continue;
+            
+            // 收集需要处理的帧
+            let framesToProcess = [];
+            for (let frameIdx of relatedFrameIdxs) {
+                if (pendingFrames[frameIdx]) {
+                    framesToProcess.push({ frameIdx, frame: pendingFrames[frameIdx] });
+                }
+            }
+            
+            // 清空当前索引的映射（这些帧将被处理）
+            delete pendingIndexMap[currentIdx];
+            
+            for (let { frameIdx, frame } of framesToProcess) {
+                // 从所有相关索引映射中移除该帧
+                removeFromPendingIndexMap(frame.indices, frameIdx);
+                
                 let result = tryResolveFrame(frame);
+                
                 if (result === null) {
                     // 冗余帧，丢弃
-                    continue;
+                    pendingFrames[frameIdx] = null;
                 } else if (result.pending) {
-                    // 仍有多个未知
-                    newPending.push({ indices: result.indices, chunk: result.chunk });
+                    // 仍有多个未知，更新帧并重新添加到映射
+                    let newFrame = { indices: result.indices, chunk: result.chunk };
+                    pendingFrames[frameIdx] = newFrame;
+                    addToPendingIndexMap(result.indices, frameIdx);
                 } else {
                     // 解码出一个新块！
+                    pendingFrames[frameIdx] = null;
                     if (!decodedChunks[result.index]) {
                         decodedChunks[result.index] = result.data;
-                        changed = true;
+                        newlyDecoded.push({ index: result.index, data: result.data });
                     }
                 }
             }
-            pendingFrames = newPending;
+        }
+        
+        // 清理 pendingFrames 中的空位（惰性清理，避免频繁数组重建）
+        if (pendingFrames.length > 200) {
+            let nonNullCount = pendingFrames.filter(f => f !== null).length;
+            if (nonNullCount < pendingFrames.length / 2) {
+                pendingFrames = pendingFrames.filter(f => f !== null);
+                // 重建索引映射
+                pendingIndexMap = {};
+                for (let i = 0; i < pendingFrames.length; i++) {
+                    if (pendingFrames[i]) {
+                        addToPendingIndexMap(pendingFrames[i].indices, i);
+                    }
+                }
+            }
         }
     }
 
@@ -315,6 +383,20 @@
             let [count, indices] = metaPart.split(":");
             let indexList = indices.split(",").map(Number);
 
+            // === 帧哈希去重 ===
+            let frameHash = getFrameHash(indexList);
+            if (processedFrameHashes.has(frameHash)) {
+                // 已处理过相同索引组合的帧，跳过
+                return false;
+            }
+            // 记录已处理的帧哈希（限制集合大小避免内存膨胀）
+            if (processedFrameHashes.size > 2000) {
+                // 清理一半的旧记录
+                let keys = Array.from(processedFrameHashes).slice(0, 1000);
+                keys.forEach(k => processedFrameHashes.delete(k));
+            }
+            processedFrameHashes.add(frameHash);
+
             // 解码 Base45 payload
             let payload = parts.slice(3).join("|"); // 处理 payload 中可能包含的 |
             let chunk = decodeBase45(payload);
@@ -326,11 +408,21 @@
                 // 冗余帧
                 return false;
             } else if (result.pending) {
-                // 暂存待消元
-                pendingFrames.push({ indices: result.indices, chunk: result.chunk });
+                // 暂存待消元，添加到索引映射
+                let frameIdx = pendingFrames.length;
+                let newFrame = { indices: result.indices, chunk: result.chunk };
+                pendingFrames.push(newFrame);
+                addToPendingIndexMap(result.indices, frameIdx);
+                
                 // 限制 pending 队列长度，避免内存膨胀
                 if (pendingFrames.length > 500) {
-                    pendingFrames = pendingFrames.slice(-300);
+                    // 清理时需要重建索引映射
+                    let validFrames = pendingFrames.filter(f => f !== null);
+                    pendingFrames = validFrames;
+                    pendingIndexMap = {};
+                    for (let i = 0; i < pendingFrames.length; i++) {
+                        addToPendingIndexMap(pendingFrames[i].indices, i);
+                    }
                 }
                 return false;
             } else {
