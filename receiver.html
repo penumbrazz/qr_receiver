@@ -88,8 +88,8 @@
 </head>
 <body>
 <h1>TXQR Receiver</h1>
-<video id="video" width="100%" height="400" autoplay muted playsinline></video>
-<canvas id="canvas" width="640" height="640" style="display:none;"></canvas>
+<video id="video" autoplay muted playsinline style="display:none;"></video>
+<canvas id="canvas" width="640" height="640" style="width:100%;max-width:640px;"></canvas>
 
 <div class="progress-container">
     <div class="file-info">
@@ -163,13 +163,9 @@
         })
             .then(stream => {
                 video.srcObject = stream;
-                // 视频就绪后，将 canvas 设为实际视频短边的正方形
                 let track = stream.getVideoTracks()[0];
                 let settings = track.getSettings();
-                let side = Math.min(settings.width || 640, settings.height || 640);
-                canvas.width = side;
-                canvas.height = side;
-                console.log(`摄像头实际分辨率: ${settings.width}x${settings.height}, canvas: ${side}x${side}`);
+                console.log(`摄像头实际分辨率: ${settings.width}x${settings.height}`);
             })
             .catch(err => {
                 console.error(err);
@@ -384,7 +380,13 @@
     let lastFrameData = "";
 
     function scanFrame() {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        // 从视频中心裁切最大正方形区域，避免拉伸变形
+        let vw = video.videoWidth || canvas.width;
+        let vh = video.videoHeight || canvas.height;
+        let side = Math.min(vw, vh);
+        let sx = (vw - side) / 2;
+        let sy = (vh - side) / 2;
+        ctx.drawImage(video, sx, sy, side, side, 0, 0, canvas.width, canvas.height);
         let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         let code = jsQR(imageData.data, imageData.width, imageData.height);
         if (code && code.data !== lastFrameData) {
